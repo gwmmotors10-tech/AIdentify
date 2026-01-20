@@ -8,23 +8,15 @@ import CameraCapture from './components/CameraCapture';
 import PartCard from './components/PartCard';
 import * as XLSX from "https://esm.sh/xlsx";
 
-// Defining AIStudio interface and using it on window with readonly modifier to match existing declarations
-interface AIStudio {
-  hasSelectedApiKey: () => Promise<boolean>;
-  openSelectKey: () => Promise<void>;
-}
-
-declare global {
-  interface Window {
-    readonly aistudio: AIStudio;
-  }
-}
+// Removed redundant AIStudio interface and global Window augmentation 
+// as it is already pre-configured in the environment and causing conflict errors.
 
 const App: React.FC = () => {
   const [isLanding, setIsLanding] = useState(true);
   const [view, setView] = useState<'list' | 'add' | 'recognize' | 'assistant'>('list');
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<RecognitionResult | null>(null);
   const [parts, setParts] = useState<PartRecord[]>([]);
   const [currentCapture, setCurrentCapture] = useState<string | null>(null);
@@ -54,7 +46,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const checkApiKey = async () => {
+      // @ts-ignore - window.aistudio is pre-configured
       if (window.aistudio) {
+        // @ts-ignore
         const has = await window.aistudio.hasSelectedApiKey();
         setHasApiKey(has);
       }
@@ -68,7 +62,9 @@ const App: React.FC = () => {
   }, [isLanding]);
 
   const handleOpenApiKeyDialog = async () => {
+    // @ts-ignore
     if (window.aistudio) {
+      // @ts-ignore
       await window.aistudio.openSelectKey();
       setHasApiKey(true);
     }
@@ -122,15 +118,21 @@ const App: React.FC = () => {
       return;
     }
     setIsAnalyzing(true);
+    setAnalysisError(null);
     setAnalysisResult(null);
     try {
       const result = await analyzeSimilarity(img, parts);
       setAnalysisResult(result);
+      if (result.matches.length === 0) {
+        setAnalysisError("Nenhuma peça correspondente encontrada no banco de dados.");
+      }
     } catch (err: any) {
       console.error(err);
-      if (err.message?.includes("entity was not found")) {
+      if (err.message?.includes("API_KEY_MISSING") || err.message?.includes("entity was not found")) {
         setHasApiKey(false);
-        alert("Sua chave API expirou ou é inválida. Por favor, selecione novamente.");
+        setAnalysisError("Chave API ausente ou inválida. Por favor, reconfigure.");
+      } else {
+        setAnalysisError(`Erro na análise: ${err.message}`);
       }
     } finally {
       setIsAnalyzing(false);
@@ -221,6 +223,8 @@ const App: React.FC = () => {
     setCapturedAngles([]);
     setCurrentCapture(null);
     setEditingPartId(null);
+    setAnalysisError(null);
+    setAnalysisResult(null);
   };
 
   const handleXlsxUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -456,7 +460,7 @@ const App: React.FC = () => {
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
                 <div className="space-y-4">
                   <img src={currentCapture} className="rounded-3xl border border-white/10 shadow-2xl w-full aspect-square object-cover" />
-                  <button onClick={() => { setCurrentCapture(null); setAnalysisResult(null); setIsCameraOpen(true); }} className="w-full py-4 glass border border-white/10 text-zinc-400 font-bold uppercase text-xs tracking-widest rounded-2xl">Nova Captura</button>
+                  <button onClick={() => { setCurrentCapture(null); setAnalysisResult(null); setAnalysisError(null); setIsCameraOpen(true); }} className="w-full py-4 glass border border-white/10 text-zinc-400 font-bold uppercase text-xs tracking-widest rounded-2xl">Nova Captura</button>
                 </div>
                 <div className="space-y-6">
                    {isAnalyzing ? (
@@ -466,6 +470,11 @@ const App: React.FC = () => {
                      </div>
                    ) : (
                      <div className="space-y-6">
+                        {analysisError && (
+                          <div className="glass p-6 rounded-2xl border-l-4 border-red-500 text-red-400 text-sm font-bold uppercase tracking-widest">
+                            {analysisError}
+                          </div>
+                        )}
                         {analysisResult && (
                           <>
                             <div className="glass p-6 rounded-2xl border-l-4 border-amber-500">
@@ -475,11 +484,15 @@ const App: React.FC = () => {
                             <div className="space-y-4">
                               <h4 className="text-xs font-bold text-white uppercase tracking-widest border-b border-white/10 pb-2">Resultados Similares</h4>
                               <div className="grid gap-4">
-                                {analysisResult.matches.map(m => {
-                                  const part = parts.find(p => p.id === m.id);
-                                  if (!part) return null;
-                                  return <PartCard key={m.id} part={part} similarity={m.score} reason={m.reason} isHighConfidence={m.score >= 70} />;
-                                })}
+                                {analysisResult.matches.length > 0 ? (
+                                  analysisResult.matches.map(m => {
+                                    const part = parts.find(p => p.id === m.id);
+                                    if (!part) return null;
+                                    return <PartCard key={m.id} part={part} similarity={m.score} reason={m.reason} isHighConfidence={m.score >= 70} />;
+                                  })
+                                ) : !analysisError && (
+                                  <p className="text-xs text-zinc-500 italic">Nenhum resultado similar encontrado.</p>
+                                )}
                               </div>
                             </div>
                           </>

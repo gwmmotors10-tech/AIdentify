@@ -4,7 +4,6 @@ import { PartRecord, RecognitionResult } from "../types";
 
 /**
  * Retorna uma nova instância do cliente GenAI. 
- * É importante instanciar no momento do uso para garantir o acesso à chave API correta (injetada ou selecionada).
  */
 export const getAIClient = () => {
   const apiKey = process.env.API_KEY;
@@ -20,10 +19,14 @@ export const getAIClient = () => {
 async function imageUrlToBase64(url: string): Promise<string | null> {
   if (!url) return null;
   try {
+    // Adicionamos t=timestamp para evitar problemas de cache e ajudar com CORS em alguns ambientes
     const proxyUrl = `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
     const response = await fetch(proxyUrl, { mode: 'cors' });
     
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.warn(`Falha ao buscar imagem para análise: ${url} (Status: ${response.status})`);
+      return null;
+    }
     
     const blob = await response.blob();
     return new Promise((resolve) => {
@@ -37,13 +40,13 @@ async function imageUrlToBase64(url: string): Promise<string | null> {
       reader.readAsDataURL(blob);
     });
   } catch (e) {
-    console.error(`Erro ao processar imagem para IA: ${url}`, e);
+    console.error(`Erro de rede/CORS ao processar imagem para IA: ${url}`, e);
     return null;
   }
 }
 
 /**
- * Análise de similaridade multimodal
+ * Análise de similaridade multimodal (Imagem Alvo vs Banco de Dados)
  */
 export const analyzeSimilarity = async (
   targetImageBase64: string,
@@ -52,18 +55,20 @@ export const analyzeSimilarity = async (
   const ai = getAIClient();
   const targetData = targetImageBase64.includes(',') ? targetImageBase64.split(',')[1] : targetImageBase64;
 
+  // Filtrar apenas peças que têm imagens. Aumentamos o limite para 20 referências.
   const partsWithImages = history.filter(p => p.imageUrls && p.imageUrls.length > 0);
   if (partsWithImages.length === 0) {
-    return { matches: [], detectedFeatures: "Nenhuma imagem de referência disponível no banco." };
+    return { matches: [], detectedFeatures: "Nenhuma imagem de referência disponível no banco de dados para comparação." };
   }
 
-  const referenceParts = partsWithImages.slice(0, 8);
+  // Pegamos as últimas 20 peças cadastradas ou atualizadas
+  const referenceParts = partsWithImages.slice(0, 20);
   const referenceImagesParts = await Promise.all(
     referenceParts.map(async (part) => {
       const base64 = await imageUrlToBase64(part.imageUrls[0]);
       if (!base64) return null;
       return [
-        { text: `[ID: ${part.id}] ${part.partName} (${part.partNumber})` },
+        { text: `ID_PEÇA: ${part.id} | NOME: ${part.partName} | REF: ${part.partNumber}` },
         { inlineData: { mimeType: "image/jpeg", data: base64 } }
       ];
     })
@@ -71,55 +76,75 @@ export const analyzeSimilarity = async (
 
   const validRefs = referenceImagesParts.filter(Boolean).flat() as any[];
 
+  if (validRefs.length === 0) {
+    return { matches: [], detectedFeatures: "Não foi possível carregar as imagens de referência para comparação visual." };
+  }
+
   const systemInstruction = `
-    Você é um especialista em visão industrial. Compare a imagem ALVO com as imagens de REFERÊNCIA.
-    Busque por similaridade de forma, furos, relevos e proporções.
+    Você é um especialista em visão computacional industrial para a AIdentify.
+    Sua tarefa é identificar peças industriais comparando uma imagem 'ALVO' com um conjunto de imagens de 'REFERÊNCIA'.
     
-    Retorne o JSON:
+    INSTRUÇÕES:
+    1. Analise cuidadosamente a geometria, furos, bordas e texturas.
+    2. Ignore variações de iluminação.
+    3. Para cada peça similar encontrada, atribua uma pontuação de 0 a 100.
+    4. O ID no JSON deve ser exatamente o 'ID_PEÇA' fornecido no texto da referência.
+    5. No campo 'detectedFeatures', descreva o diagnóstico da peça ALVO em português.
+
+    RESPOSTA:
+    Retorne EXCLUSIVAMENTE um objeto JSON válido.
     {
-      "matches": [{"id": "string", "score": number, "reason": "motivo em português"}],
-      "detectedFeatures": "características técnicas detectadas em português"
+      "matches": [{"id": "UUID", "score": número, "reason": "motivo em português"}],
+      "detectedFeatures": "diagnóstico técnico"
     }
   `;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
-        parts: [
-          { text: "ALVO:" },
-          { inlineData: { mimeType: "image/jpeg", data: targetData } },
-          { text: "REFERÊNCIAS:" },
-          ...validRefs
-        ]
-      }
-    ],
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          matches: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                score: { type: Type.NUMBER },
-                reason: { type: Type.STRING }
-              },
-              required: ["id", "score", "reason"]
-            }
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          parts: [
+            { text: "IMAGEM ALVO PARA IDENTIFICAÇÃO:" },
+            { inlineData: { mimeType: "image/jpeg", data: targetData } },
+            { text: "BANCO DE REFERÊNCIAS PARA COMPARAÇÃO:" },
+            ...validRefs
+          ]
+        }
+      ],
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            matches: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  score: { type: Type.NUMBER },
+                  reason: { type: Type.STRING }
+                },
+                required: ["id", "score", "reason"]
+              }
+            },
+            detectedFeatures: { type: Type.STRING }
           },
-          detectedFeatures: { type: Type.STRING }
-        },
-        required: ["matches", "detectedFeatures"]
+          required: ["matches", "detectedFeatures"]
+        }
       }
-    }
-  });
+    });
 
-  return JSON.parse(response.text || '{}') as RecognitionResult;
+    const resultText = response.text || '{}';
+    // Limpeza de possíveis blocos de código que a IA possa retornar mesmo com schema
+    const cleanedText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleanedText) as RecognitionResult;
+  } catch (err: any) {
+    console.error("Erro na chamada da API Gemini:", err);
+    throw new Error(`Falha na análise da IA: ${err.message}`);
+  }
 };
 
 // --- Helpers ---

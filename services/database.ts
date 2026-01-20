@@ -23,110 +23,153 @@ export const getSupabaseClient = (): SupabaseClient | null => {
 const BUCKET_NAME = "parts-images";
 
 /**
+ * Tenta inicializar o bucket de storage se ele não existir.
+ * Nota: Pode falhar se a chave anon não tiver permissões de admin, 
+ * por isso o SQL manual é sempre recomendado.
+ */
+export const initializeStorage = async () => {
+  const client = getSupabaseClient();
+  if (!client) return;
+
+  try {
+    const { data: buckets } = await client.storage.listBuckets();
+    const exists = buckets?.some(b => b.id === BUCKET_NAME);
+    
+    if (!exists) {
+      const { error } = await client.storage.createBucket(BUCKET_NAME, {
+        public: true,
+        allowedMimeTypes: ['image/jpeg', 'image/png'],
+        fileSizeLimit: 5242880 // 5MB
+      });
+      if (error) console.warn("Aviso: Não foi possível criar o bucket via código. Certifique-se de criá-lo manualmente no painel do Supabase com o nome 'parts-images'.", error.message);
+    }
+  } catch (e) {
+    console.warn("Erro ao verificar/criar bucket:", e);
+  }
+};
+
+/**
+ * Converte base64 para Blob de forma robusta
+ */
+async function base64ToBlob(base64: string): Promise<Blob> {
+  const response = await fetch(base64);
+  return await response.blob();
+}
+
+/**
  * Faz o upload de uma imagem base64 para o Supabase Storage e retorna a URL pública.
  */
 export const uploadImage = async (base64: string, path: string): Promise<string> => {
   const client = getSupabaseClient();
-  if (!client) throw new Error("Supabase não configurado.");
+  if (!client) throw new Error("Cliente Supabase não inicializado.");
 
-  // Converte base64 para Blob
-  const res = await fetch(base64);
-  const blob = await res.blob();
-  
-  const fileName = `${path}/${crypto.randomUUID()}.jpg`;
-  
-  const { data, error } = await client.storage
-    .from(BUCKET_NAME)
-    .upload(fileName, blob, { 
-      contentType: 'image/jpeg',
-      upsert: true 
-    });
+  try {
+    const blob = await base64ToBlob(base64);
+    
+    // Sanitiza o path (remove caracteres que podem quebrar a URL do storage)
+    const sanitizedPath = path.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const fileName = `${sanitizedPath}/${crypto.randomUUID()}.jpg`;
+    
+    const { data, error } = await client.storage
+      .from(BUCKET_NAME)
+      .upload(fileName, blob, { 
+        contentType: 'image/jpeg',
+        cacheControl: '3600',
+        upsert: true 
+      });
 
-  if (error) {
-    console.error("Erro no upload do Storage:", error);
-    throw error;
+    if (error) {
+      console.error("Erro no Storage (Upload):", error);
+      throw new Error(`Erro no Storage: ${error.message}. Verifique se o bucket '${BUCKET_NAME}' existe e tem políticas de RLS para INSERT.`);
+    }
+
+    const { data: { publicUrl } } = client.storage
+      .from(BUCKET_NAME)
+      .getPublicUrl(data.path);
+
+    return publicUrl;
+  } catch (err: any) {
+    throw new Error(`Falha no upload da imagem: ${err.message}`);
   }
-
-  const { data: { publicUrl } } = client.storage
-    .from(BUCKET_NAME)
-    .getPublicUrl(data.path);
-
-  return publicUrl;
 };
 
 export const savePartToDB = async (part: PartRecord): Promise<void> => {
   const client = getSupabaseClient();
   if (!client) {
-    const localParts = JSON.parse(localStorage.getItem('parts_fallback') || '[]');
-    const index = localParts.findIndex((p: any) => p.id === part.id);
-    if (index > -1) localParts[index] = part;
-    else localParts.push(part);
-    localStorage.setItem('parts_fallback', JSON.stringify(localParts));
-    return;
+    throw new Error("Supabase não configurado. Verifique a URL e a KEY.");
   }
 
-  // Upload das imagens locais (base64) para o Storage antes de salvar os metadados
-  const uploadedUrls = await Promise.all(
-    part.imageUrls.map(url => url.startsWith('data:') ? uploadImage(url, part.partNumber) : url)
-  );
+  try {
+    // 1. Upload das imagens (apenas as novas que estão em base64)
+    const uploadedUrls = await Promise.all(
+      part.imageUrls.map(async (url) => {
+        if (url.startsWith('data:')) {
+          return await uploadImage(url, part.partNumber || 'unnamed_part');
+        }
+        return url;
+      })
+    );
 
-  // Mapeamento para o formato snake_case do banco de dados
-  const partToSave = {
-    id: part.id,
-    part_number: part.partNumber,
-    part_name: part.partName,
-    color: part.color,
-    workstation: part.workstation,
-    models: part.models,
-    image_urls: uploadedUrls,
-    timestamp: part.timestamp
-  };
+    // 2. Mapeamento para o formato snake_case da tabela do Supabase
+    const partToSave = {
+      id: part.id,
+      part_number: part.partNumber,
+      part_name: part.partName,
+      color: part.color,
+      workstation: part.workstation,
+      models: part.models || [],
+      image_urls: uploadedUrls,
+      timestamp: part.timestamp || Date.now()
+    };
 
-  const { error } = await client
-    .from("parts")
-    .upsert([partToSave]);
+    const { error } = await client
+      .from("parts")
+      .upsert([partToSave], { onConflict: 'id' });
 
-  if (error) throw error;
+    if (error) {
+      console.error("Erro no Database (Upsert):", error);
+      throw new Error(`Erro no Banco de Dados: ${error.message}. Verifique as políticas de RLS para a tabela 'parts'.`);
+    }
+  } catch (err: any) {
+    console.error("Erro completo em savePartToDB:", err);
+    throw err;
+  }
 };
 
 export const getAllPartsFromDB = async (): Promise<PartRecord[]> => {
   const client = getSupabaseClient();
-  if (!client) {
-    return JSON.parse(localStorage.getItem('parts_fallback') || '[]') as PartRecord[];
-  }
+  if (!client) return [];
 
   const { data, error } = await client
     .from("parts")
     .select("*")
     .order("timestamp", { ascending: false });
 
-  if (error) throw error;
+  if (error) {
+    console.error("Erro ao buscar peças:", error);
+    throw new Error(`Erro ao buscar dados: ${error.message}`);
+  }
 
-  // Mapeamento de volta para o formato CamelCase do TypeScript
-  return data.map(item => ({
+  return (data || []).map(item => ({
     id: item.id,
     partNumber: item.part_number,
     partName: item.part_name,
     color: item.color,
     workstation: item.workstation,
-    models: item.models,
-    imageUrls: item.image_urls,
+    models: item.models || [],
+    imageUrls: item.image_urls || [],
     timestamp: item.timestamp
   })) as PartRecord[];
 };
 
 export const deletePartFromDB = async (id: string): Promise<void> => {
   const client = getSupabaseClient();
-  if (!client) {
-    const localParts = JSON.parse(localStorage.getItem('parts_fallback') || '[]');
-    localStorage.setItem('parts_fallback', JSON.stringify(localParts.filter((p: any) => p.id !== id)));
-    return;
-  }
+  if (!client) return;
 
   const { error } = await client
     .from("parts")
     .delete()
     .eq("id", id);
 
-  if (error) throw error;
+  if (error) throw new Error(`Erro ao excluir: ${error.message}`);
 };

@@ -1,0 +1,9 @@
+
+{
+  "name": "Industrial Part Recognizer AI",
+  "description": "An AI-powered application for industrial parts management, featuring image recognition, metadata tracking, and similarity analysis using Gemini AI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

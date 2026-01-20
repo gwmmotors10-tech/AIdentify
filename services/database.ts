@@ -2,9 +2,10 @@
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.1";
 import { PartRecord } from "../types";
 
-// Credenciais atualizadas com a API fornecida pelo usuário
+// Credenciais atualizadas
 const SUPABASE_URL = "https://sqefcgtihapowjguachy.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNxZWZjZ3RpaGFwb3dqZ3VhY2h5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwMTYwNzIsImV4cCI6MjA4MjU5MjA3Mn0.Z-uBM4LRZrJkAwqoU1YKCrRrNTCQTcpXLLKaPCk-N7k";
+// O usuário forneceu uma chave com prefixo sb_publishable, atualizando conforme solicitado.
+const SUPABASE_KEY = "sb_publishable_6BcgxqZUtUZyh7PD0gd45A_TyUdEALp";
 
 let _supabase: SupabaseClient | null = null;
 

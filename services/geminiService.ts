@@ -7,23 +7,37 @@ export const getAIClient = () => {
 };
 
 /**
- * Converte uma URL de imagem para Base64 para que o Gemini possa processar
+ * Converte uma URL de imagem para Base64 de forma resiliente.
+ * Se falhar (ex: erro de CORS no Supabase), retorna null.
  */
 async function imageUrlToBase64(url: string): Promise<string | null> {
+  if (!url) return null;
   try {
-    const response = await fetch(url);
+    // Adicionamos um timestamp para evitar cache agressivo que pode causar erros de CORS em alguns casos
+    const proxyUrl = `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+    const response = await fetch(proxyUrl, { mode: 'cors' });
+    
+    if (!response.ok) {
+      console.warn(`Falha ao buscar imagem: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    
     const blob = await response.blob();
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        const base64String = (reader.result as string).split(',')[1];
+        const result = reader.result as string;
+        const base64String = result.split(',')[1];
         resolve(base64String);
       };
-      reader.onerror = reject;
+      reader.onerror = () => {
+        console.error("Erro no FileReader");
+        resolve(null);
+      };
       reader.readAsDataURL(blob);
     });
   } catch (e) {
-    console.error(`Erro ao processar imagem de referência: ${url}`, e);
+    console.error(`Erro de conexão/CORS ao processar imagem: ${url}`, e);
     return null;
   }
 }
@@ -36,60 +50,74 @@ export const analyzeSimilarity = async (
   history: PartRecord[]
 ): Promise<RecognitionResult> => {
   const ai = getAIClient();
-  const targetData = targetImageBase64.split(',')[1] || targetImageBase64;
+  const targetData = targetImageBase64.includes(',') ? targetImageBase64.split(',')[1] : targetImageBase64;
 
-  // Filtramos apenas peças que possuem imagens para comparação visual
-  // Limitamos a 10 peças para evitar exceder limites de token/latência
-  const referenceParts = history
-    .filter(p => p.imageUrls && p.imageUrls.length > 0)
-    .slice(0, 12);
+  // Filtrar apenas peças que têm imagens válidas
+  const partsWithImages = history.filter(p => p.imageUrls && p.imageUrls.length > 0);
+  
+  if (partsWithImages.length === 0) {
+    return {
+      matches: [],
+      detectedFeatures: "Nenhuma peça com imagem encontrada no banco de dados para comparação visual."
+    };
+  }
+
+  // Limitamos a 8 referências para garantir performance e evitar limites de payload
+  const referenceParts = partsWithImages.slice(0, 8);
 
   const referenceImagesParts = await Promise.all(
     referenceParts.map(async (part) => {
       const base64 = await imageUrlToBase64(part.imageUrls[0]);
       if (!base64) return null;
       return [
-        { text: `REFERENCE_PART_ID: ${part.id} | Name: ${part.partName} | No: ${part.partNumber}` },
+        { text: `[ID: ${part.id}] PEÇA: ${part.partName} (Nº ${part.partNumber})` },
         { inlineData: { mimeType: "image/jpeg", data: base64 } }
       ];
     })
   );
 
-  const flattenedRefs = referenceImagesParts.filter(Boolean).flat() as any[];
+  const validRefs = referenceImagesParts.filter(Boolean).flat() as any[];
+
+  if (validRefs.length === 0) {
+    return {
+      matches: [],
+      detectedFeatures: "Erro ao carregar as imagens de referência do banco de dados. Verifique as configurações de CORS do seu bucket no Supabase."
+    };
+  }
 
   const systemInstruction = `
-    You are a specialized Industrial Vision AI. 
-    Your task is to compare the "TARGET_IMAGE" with the provided "REFERENCE_IMAGES".
+    Você é um Especialista em Visão Computacional Industrial.
+    Sua missão é comparar a imagem ALVO (TARGET) com as imagens de REFERÊNCIA fornecidas.
     
-    1. Analyze the TARGET_IMAGE for shape, holes, texture, and color.
-    2. Compare it visually against each image in the reference sequence.
-    3. Assign a similarity score (0-100) based on visual resemblance.
-    4. If no visual match is found, focus on the most similar physical characteristics.
-    
-    Return a JSON object:
+    CRITÉRIOS DE ANÁLISE:
+    1. Geometria: Verifique formas, furos, bordas e proporções.
+    2. Detalhes: Observe texturas, marcações e cores.
+    3. Use as imagens de referência para identificar qual peça do banco de dados é a mais provável.
+
+    REGRA DE RESPOSTA:
+    Retorne estritamente um JSON no formato:
     {
-      "matches": [{"id": string, "score": number, "reason": string}],
-      "detectedFeatures": string
+      "matches": [{"id": "string", "score": number, "reason": "descrição curta em português"}],
+      "detectedFeatures": "Breve diagnóstico técnico da peça capturada em português"
     }
   `;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
+      model: "gemini-3-flash-preview", // Flash é mais rápido e excelente para visão-para-json
       contents: [
         {
           parts: [
-            { text: "TARGET_IMAGE:" },
+            { text: "IMAGEM ALVO PARA RECONHECIMENTO:" },
             { inlineData: { mimeType: "image/jpeg", data: targetData } },
-            { text: "--- REFERENCE DATABASE START ---" },
-            ...flattenedRefs,
-            { text: "--- END OF DATABASE. Please analyze similarity now. ---" }
+            { text: "--- INÍCIO DO BANCO DE REFERÊNCIAS ---" },
+            ...validRefs,
+            { text: "--- FIM DO BANCO. ANALISE E COMPARE AGORA. ---" }
           ]
         }
       ],
       config: {
         systemInstruction,
-        thinkingConfig: { thinkingBudget: 32768 },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -115,16 +143,16 @@ export const analyzeSimilarity = async (
 
     const resultText = response.text || '{}';
     return JSON.parse(resultText) as RecognitionResult;
-  } catch (error) {
-    console.error("Similarity Analysis Error:", error);
+  } catch (error: any) {
+    console.error("Erro na análise profunda do Gemini:", error);
     return { 
       matches: [], 
-      detectedFeatures: "Erro ao processar análise multimodal. Verifique a conexão com o banco de imagens." 
+      detectedFeatures: `Erro técnico na análise: ${error.message || 'Falha na comunicação com o motor de IA'}.` 
     };
   }
 };
 
-// --- Live Audio Helpers (Mantidos para Assistente) ---
+// --- Live Audio Helpers (Mantidos sem alterações) ---
 
 export function encode(bytes: Uint8Array) {
   let binary = '';

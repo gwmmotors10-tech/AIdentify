@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { PartRecord, PartColor, PartModel, RecognitionResult } from './types';
 import { analyzeSimilarity, getAIClient, encode, decode, decodeAudioData } from './services/geminiService';
-import { getAllPartsFromDB, savePartToDB, deletePartFromDB, getSupabaseClient } from './services/database';
+import { getAllPartsFromDB, savePartToDB, deletePartFromDB, getSupabaseClient, initializeStorage } from './services/database';
 import { Modality } from '@google/genai';
 import CameraCapture from './components/CameraCapture';
 import PartCard from './components/PartCard';
@@ -43,7 +43,13 @@ const App: React.FC = () => {
 
   // Check configuration and load parts on mount
   useEffect(() => {
-    setIsCloudConfigured(!!getSupabaseClient());
+    const client = getSupabaseClient();
+    setIsCloudConfigured(!!client);
+    
+    if (client) {
+      initializeStorage();
+    }
+
     if (!isLanding) {
       loadData();
     }
@@ -53,7 +59,7 @@ const App: React.FC = () => {
     try {
       const data = await getAllPartsFromDB();
       setParts(data);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Error loading data:", e);
     }
   };
@@ -77,8 +83,9 @@ const App: React.FC = () => {
           };
           await savePartToDB(updatedPart);
           await loadData();
-        } catch (e) {
-          alert("Error uploading image.");
+        } catch (e: any) {
+          console.error("Capture Save Error:", e);
+          alert(`Erro ao salvar foto: ${e.message}`);
         } finally {
           setIsSaving(false);
         }
@@ -166,8 +173,9 @@ const App: React.FC = () => {
       await loadData();
       resetForm();
       setView('list');
-    } catch (err) {
-      alert("Database error.");
+    } catch (err: any) {
+      console.error("Submit Error:", err);
+      alert(`Falha ao salvar no banco de dados: ${err.message}`);
     } finally {
       setIsSaving(false);
     }
@@ -232,8 +240,10 @@ const App: React.FC = () => {
           await savePartToDB(record);
         }
         await loadData();
-      } catch (err) {
-        alert("XLSX Import failed.");
+        alert("Importação concluída com sucesso!");
+      } catch (err: any) {
+        console.error("XLSX Error:", err);
+        alert(`Falha na importação XLSX: ${err.message}`);
       } finally {
         setIsSaving(false);
       }
@@ -308,12 +318,12 @@ const App: React.FC = () => {
   };
 
   const deletePart = async (id: string) => {
-    if (confirm("Confirm deletion? (确认删除?)")) {
+    if (confirm("Confirmar exclusão? (确认删除?)")) {
       try {
         await deletePartFromDB(id);
         setParts(prev => prev.filter(p => p.id !== id));
-      } catch (e) {
-        alert("Error deleting.");
+      } catch (e: any) {
+        alert(`Erro ao excluir: ${e.message}`);
       }
     }
   };
@@ -353,15 +363,15 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen pb-24 text-zinc-100">
       {!isCloudConfigured && (
-        <div className="bg-amber-500/20 border-b border-amber-500/50 p-2 text-center text-[10px] font-bold text-amber-500 uppercase tracking-widest sticky top-0 z-[60] backdrop-blur-sm">
-          ⚠️ Local Storage Mode - Supabase Credentials Missing (本地存储模式 - 缺少 Supabase 凭据)
+        <div className="bg-red-500/20 border-b border-red-500/50 p-2 text-center text-[10px] font-bold text-red-500 uppercase tracking-widest sticky top-0 z-[60] backdrop-blur-sm">
+          ⚠️ Connection Failure - Check Supabase Credentials (连接失败 - 检查 Supabase 凭据)
         </div>
       )}
 
       {isSaving && (
         <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex flex-col items-center justify-center">
            <div className="w-16 h-16 border-4 border-amber-500 border-t-transparent animate-spin rounded-full mb-4"></div>
-           <p className="text-amber-500 font-brand font-bold tracking-widest animate-pulse">SYNCING... (同步中...)</p>
+           <p className="text-amber-500 font-brand font-bold tracking-widest animate-pulse">SYNCING TO CLOUD... (正在同步至云端...)</p>
         </div>
       )}
 
